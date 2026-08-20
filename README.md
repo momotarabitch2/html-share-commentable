@@ -29,14 +29,16 @@ git clone https://github.com/momotarabitch2/html-share-commentable.git \
 完成済みの自己完結HTMLを、Google Apps Scriptで共有できるコメント付きWebアプリへ変換します。
 
 - 元のHTMLへ、場所を指定できるコメントUIを追加
-- 公開ページには投稿者の表示名だけを表示
-- 認証済みGoogleメールは非公開の`comments` / `reviewers` Sheetだけへ保存
-- 初回投稿時に表示名を登録し、同じメールでは保存済み表示名を継続利用
-- 別メールによる同一表示名の登録を拒否
+- 公開ページには投稿者が入力した表示名だけを表示
+- 初回投稿時に表示名を登録し、同じブラウザでは保存済み表示名を継続利用
+- Googleアカウントやメールアドレスに依存せず、組織内限定・ログイン必須・ログイン不要の各公開範囲で同じコメントUIを利用
+- コメント用の端末IDはブラウザに保持し、Sheetにはそのハッシュだけを保存
 - `Code.gs`、`Index.html`、導入手順付きの`SETUP.html`を生成
 - Apps Scriptへの貼り付け、認証、公開、動作確認を`SETUP.html`で案内
 
-Google People APIやDirectory APIは使用せず、Apps Scriptの認証済みユーザー情報とSpreadsheet機能だけで管理します。メール非表示化は投稿者情報を公開HTMLから隠す設計であり、HTMLやコメント本文へのアクセス制御はデプロイ時の公開範囲で設定します。
+Google People API、Directory API、投稿者メールは使用しません。HTMLやコメント本文へのアクセス制御は、Apps Scriptのデプロイ画面にある「アクセスできるユーザー」で設定します。社内資料ではWorkspace組織内、社外共有ではGoogleログイン必須または全員を用途に合わせて選択できます。
+
+表示名は本人確認ではありません。別端末、別ブラウザ、シークレットウィンドウ、ブラウザデータ削除後は再入力します。
 
 ## 使い方
 
@@ -55,7 +57,7 @@ node scripts/validate.mjs /absolute/path/to/report-commentable
 node scripts/test-generated.mjs /absolute/path/to/report-commentable
 ```
 
-`test-generated.mjs`は、表示名登録、メール非露出、同名登録拒否、既存Sheet移行、数式注入対策、未認証投稿拒否、レート制限をGoogle Apps Scriptのローカルモックで検証します。
+`test-generated.mjs`は、表示名の端末保持、匿名状態でのコメント読込、端末IDのハッシュ保存、同名利用、既存Sheet移行、数式注入対策、投稿制限をGoogle Apps Scriptのローカルモックで検証します。
 
 ## 更新
 

@@ -1,6 +1,6 @@
 ---
 name: html-share-commentable
-description: Convert an existing self-contained HTML file into a Google Apps Script web app with anchored review comments stored in Google Sheets, and generate a copy-friendly setup guide. Use when a completed HTML artifact needs internal sharing, identifiable commenters, location-aware comments, and a user-led Apps Script setup.
+description: Convert an existing self-contained HTML file into a Google Apps Script web app with anchored, display-name-based review comments stored in Google Sheets, plus a copy-friendly setup guide. Use when a completed HTML artifact needs URL sharing, configurable Apps Script access scope, location-aware comments, and user-led setup.
 ---
 
 # HTML Share Commentable
@@ -12,7 +12,7 @@ Turn a completed HTML artifact into a commentable Google Apps Script web app. Ke
 - Require the absolute path to one completed HTML file.
 - The HTML must be self-contained. HTTPS resources may remain external, but local relative CSS, JavaScript, images, and fonts must be inlined before generation.
 - Ask for a title only when it cannot be inferred from `<title>`.
-- Treat allowed Workspace domains as optional configuration. For reliable commenter identity, recommend sharing within the deployer's Google Workspace organization.
+- Keep access control separate from commenter naming. The user chooses the actual viewing scope in the Apps Script deployment UI.
 - Use the generated `SETUP.html` as the standard user-led path for Apps Script creation, authorization, access-scope selection, deployment, and testing.
 
 ## Generate the bundle
@@ -25,14 +25,13 @@ node scripts/generate.mjs \
   --output /absolute/path/to/report-commentable \
   [--title "Report title"] \
   [--project-name "Apps Script project name"] \
-  [--spreadsheet-name "Comment sheet name"] \
-  [--allowed-domain example.com]
+  [--spreadsheet-name "Comment sheet name"]
 ```
 
 The output must contain:
 
-- `Code.gs`: Apps Script server code that creates and migrates the backing `comments` and `reviewers` sheets, identifies the active reviewer, keeps authenticated email private, reads and appends comments, creates location links, and serves `Index.html`.
-- `Index.html`: the original HTML with a namespaced comment UI injected. It discovers meaningful sections, records the heading path and a text snapshot, asks for a unique display name on the first post, and deep-links back to the commented location.
+- `Code.gs`: Apps Script server code that creates and migrates the backing `comments` and `reviewers` sheets, maps a hashed browser-held reviewer token to a display name, reads and appends comments, creates location links, and serves `Index.html`.
+- `Index.html`: the original HTML with a namespaced comment UI injected. It discovers meaningful sections, records the heading path and a text snapshot, asks for a display name on the first post in that browser, and deep-links back to the commented location.
 - `SETUP.html`: the primary handoff. It embeds both generated files, provides one-click copy buttons, surfaces `https://script.new` for Chrome, and gives exact paste, authorization, access-scope, deployment, test, and update steps.
 
 Validate every bundle:
@@ -61,18 +60,17 @@ Otherwise the injected client discovers sections and articles, assigns stable-en
 
 Preserve the report's existing hierarchy. If automatic targets are clearly too broad or noisy, add a small number of `data-comment-anchor` markers to a generated working copy and regenerate.
 
-## Identity and access
+## Display names and access
 
-- Require the verified Google-account email from `Session.getActiveUser().getEmail()` for every post and use it only as a private server-side identity key.
-- Show only `authorDisplayName` in the public comment UI. Keep authenticated email and temporary user keys out of HTML, DOM, `google.script.run` responses, and public error messages.
-- On the first post, require a display name of 1–40 characters. Normalize whitespace and Unicode, remove control characters, reject values containing `@`, and enforce case-insensitive uniqueness across different emails.
-- Save `author_email` and `author_display_name` in the private `comments` sheet. Save `author_email`, `display_name`, `created_at`, and `updated_at` in the private `reviewers` sheet so administrators can audit the mapping.
-- For later posts from the same email, use the saved display name and ignore client attempts to overwrite it. Administrators change display names in the private `reviewers` sheet.
-- Migrate existing `comments` sheets by header name, append missing columns, and preserve existing rows and column order. Render rows without `author_display_name` as `既存レビュアー` rather than falling back to email.
-- Apply a light server-side per-email rate limit without exposing its private key to the client.
-- A Workspace-domain restriction in `Code.gs` is defense in depth; the user still chooses the actual web-app access scope in the deployment UI.
-- Explain that public or cross-domain sharing may not provide reliable identity with the default Apps Script execution model.
-- Explain that hiding email protects reviewer identity in the public UI; it does not make the HTML or comment body private from people who can access the web-app URL.
+- Let the Apps Script deployment setting control who may view the HTML and comments. The generated comment code must work with organization-only, signed-in-user, and anonymous access scopes.
+- On first post in a browser, require a display name of 1–40 characters. Normalize whitespace and Unicode, remove control characters, and reject values containing `@` to reduce accidental email disclosure.
+- Generate a random reviewer token in the browser, keep it in `localStorage`, and send it only to server functions that need it. Hash it server-side before storing or rate-limiting; never return the raw token or stored hash in public responses.
+- Map the stored token hash to the display name in the private `reviewers` sheet. Later posts from that browser use the saved server-side display name and ignore client attempts to overwrite it.
+- Treat display names as lightweight labels, not verified identity. Allow the same display name from different browser tokens. A new device, browser, private window, or cleared browser storage asks for the display name again.
+- Keep legacy `author_email` columns and values during migration, but leave them empty for new posts. Preserve existing rows and column order, append missing headers, and render old rows without `author_display_name` as `既存レビュアー` rather than falling back to email.
+- Keep the management Sheet URL out of `getCommentState`, `addComment`, HTML, DOM, public errors, and other web-app responses. Return it only from `setupComments` run by the deployer in the Apps Script editor.
+- Apply lightweight per-token and global server-side rate limits. Preserve length limits, Sheet formula-injection protection, and `textContent` rendering for user-generated strings.
+- Explain that access scope controls who can open the page, while display-name persistence controls only the label shown with comments.
 
 ## Handoff
 
@@ -87,9 +85,10 @@ The setup guide must use literal UI instructions, including:
 - select `setupComments` in the function selector beside Run and click Run;
 - when Google shows `このアプリはGoogleで確認されていません`, confirm it is the project just created from the generated files, click `詳細`, click the link to the project marked `安全ではないページ`, continue to the permission screen, allow the requested access, and wait for completion;
 - choose Deploy > New deployment > Web app, then deliberately choose execution identity and who has access;
-- for internal Workspace review, recommend Execute as me and access limited to the organization;
+- choose Execute as me, then choose the viewing scope separately: Workspace organization for internal material, signed-in users when Google login is sufficient, or everyone for login-free sharing;
+- explain that Google-authenticated access can fail in browsers signed into multiple Google accounts because Apps Script does not support multi-login reliably, and recommend the intended Workspace account's Chrome profile when that occurs;
 - copy and test the `/exec` URL, post a test comment, and verify the Sheet row and deep link;
-- verify that the public comment card shows only the display name while the private `comments` and `reviewers` sheets retain the display-name-to-email mapping;
+- verify that the first post asks for a display name, a second post in the same browser reuses it, and the private `comments` and `reviewers` sheets contain no new author email;
 - for existing deployments, replace both `Code.gs` and `Index.html`, run `setupComments` to migrate the sheets, then use Deploy > Manage deployments > Edit > New version > Deploy.
 
 After local validation passes:

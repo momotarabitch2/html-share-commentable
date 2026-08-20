@@ -10,8 +10,37 @@
   var showAll = true;
   var pendingLocation = null;
   var submitting = false;
-  var identityState = { authenticated: false, displayName: '', needsDisplayName: false };
+  var storageKey = 'hsc-reviewer-v2:' + String(config.reportId || 'default');
+  var reviewerState = loadReviewerState();
+  var identityState = { displayName: reviewerState.displayName, needsDisplayName: !reviewerState.displayName };
   var icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10H9l-4 3v-13Z"></path></svg>';
+
+  function makeReviewerToken() {
+    var bytes = new Uint8Array(24);
+    if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
+    else for (var i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+    var binary = '';
+    for (var j = 0; j < bytes.length; j += 1) binary += String.fromCharCode(bytes[j]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function loadReviewerState() {
+    var fallback = { reviewerToken: makeReviewerToken(), displayName: '' };
+    try {
+      var stored = JSON.parse(window.localStorage.getItem(storageKey) || 'null');
+      if (stored && /^[A-Za-z0-9_-]{24,128}$/.test(String(stored.reviewerToken || ''))) {
+        return { reviewerToken: String(stored.reviewerToken), displayName: String(stored.displayName || '').slice(0, 40) };
+      }
+      window.localStorage.setItem(storageKey, JSON.stringify(fallback));
+    } catch (error) { /* Continue with an in-memory identity when storage is unavailable. */ }
+    return fallback;
+  }
+
+  function saveReviewerState(displayName) {
+    reviewerState.displayName = String(displayName || '').slice(0, 40);
+    try { window.localStorage.setItem(storageKey, JSON.stringify(reviewerState)); }
+    catch (error) { /* The current page still retains the identity in memory. */ }
+  }
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -105,13 +134,13 @@
   headerCopy.appendChild(title);
   var close = el('button', 'hsc-close', '×');
   close.type = 'button'; close.setAttribute('aria-label', '閉じる');
-  var identity = el('p', 'hsc-identity', '投稿者情報を確認しています…');
+  var identity = el('p', 'hsc-identity', '投稿者情報を読み込んでいます…');
   header.appendChild(headerCopy); header.appendChild(close); header.appendChild(identity);
   var list = el('div', 'hsc-list');
   var form = el('form', 'hsc-form');
   var profile = el('div', 'hsc-profile');
   profile.hidden = true;
-  var displayNameLabel = el('label', '', '初回投稿用の表示名');
+  var displayNameLabel = el('label', '', '表示名');
   displayNameLabel.setAttribute('for', 'hsc-display-name');
   var displayNameInput = el('input');
   displayNameInput.id = 'hsc-display-name';
@@ -119,7 +148,7 @@
   displayNameInput.maxLength = 40;
   displayNameInput.autocomplete = 'nickname';
   displayNameInput.placeholder = '例：山田 太郎';
-  var displayNameHelp = el('p', 'hsc-help', '公開ページにはこの表示名だけが表示されます。メールアドレスは入力できません。');
+  var displayNameHelp = el('p', 'hsc-help', 'この端末に保存され、次回から自動で使われます。メールアドレスは入力できません。');
   profile.appendChild(displayNameLabel); profile.appendChild(displayNameInput); profile.appendChild(displayNameHelp);
   var label = el('label', '', 'コメントを追加');
   var textarea = el('textarea'); textarea.maxLength = Number(config.maxLength || 1000); textarea.placeholder = '確認事項や修正してほしい内容を入力';
@@ -127,8 +156,7 @@
   var footer = el('div', 'hsc-form-footer');
   var meta = el('div');
   var count = el('span', '', '0 / ' + textarea.maxLength);
-  var admin = el('a', 'hsc-admin', '管理スプレッドシート'); admin.target = '_blank'; admin.rel = 'noreferrer'; admin.hidden = true;
-  meta.appendChild(count); meta.appendChild(document.createTextNode(' · ')); meta.appendChild(admin);
+  meta.appendChild(count);
   var submit = el('button', 'hsc-submit', '投稿する'); submit.type = 'submit';
   footer.appendChild(meta); footer.appendChild(submit);
   form.appendChild(profile); form.appendChild(label); form.appendChild(textarea); form.appendChild(error); form.appendChild(footer);
@@ -138,14 +166,13 @@
   function failureMessage(failure) {
     var message = failure && failure.message ? String(failure.message) : String(failure || '');
     var allowed = [
-      'Googleアカウントを確認できないため、コメントを投稿できません。公開範囲と実行ユーザー設定を確認してください。',
-      'このGoogle Workspaceアカウントではコメントを投稿できません。',
-      '管理者アカウントでセットアップを実行してください。',
+      'Apps Scriptエディタから、デプロイ所有者のアカウントで実行してください。',
+      '投稿者情報を保存できませんでした。ページを再読み込みして再度お試しください。',
       '表示名を入力してください。',
       '表示名は40文字以内にしてください。',
       'メールアドレスを含まない表示名を入力してください。',
-      'この表示名は利用できません。別の表示名を入力してください。',
       '投稿が続いています。少し待ってから再度お試しください。',
+      '投稿が集中しています。少し待ってから再度お試しください。',
       'コメントを入力してください。',
       'コメントは' + Number(config.maxLength || 1000) + '文字以内にしてください。'
     ];
@@ -209,14 +236,15 @@
     submitting = true; submit.disabled = true; submit.textContent = '投稿中…'; hideError();
     google.script.run.withSuccessHandler(function (created) {
       comments.unshift(created);
-      identityState = { authenticated: true, displayName: created.authorDisplayName || '', needsDisplayName: false };
-      identity.textContent = identityState.displayName ? '投稿者：' + identityState.displayName : 'Googleアカウントで認証済み';
+      identityState = { displayName: created.authorDisplayName || '', needsDisplayName: false };
+      saveReviewerState(identityState.displayName);
+      identity.textContent = '投稿者：' + identityState.displayName;
       profile.hidden = true;
       displayNameInput.value = '';
       textarea.value = ''; count.textContent = '0 / ' + textarea.maxLength; submitting = false; submit.disabled = false; submit.textContent = '投稿する'; updateCounts(); render();
     }).withFailureHandler(function (failure) {
       submitting = false; submit.disabled = false; submit.textContent = '投稿する'; showError(failureMessage(failure));
-    }).addComment({ anchorId: current.id, anchorLabel: current.label, anchorPath: current.path, quoteSnapshot: current.quote, body: body, displayName: identityState.needsDisplayName ? requestedDisplayName : '' });
+    }).addComment({ anchorId: current.id, anchorLabel: current.label, anchorPath: current.path, quoteSnapshot: current.quote, body: body, displayName: identityState.needsDisplayName ? requestedDisplayName : '', reviewerToken: reviewerState.reviewerToken });
   });
 
   function loadLocation(callback) {
@@ -230,15 +258,16 @@
   loadLocation(function () {
     google.script.run.withSuccessHandler(function (state) {
       comments = Array.isArray(state.comments) ? state.comments : [];
-      identityState = state.identity || { authenticated: false, displayName: '', needsDisplayName: false };
+      identityState = state.identity || { displayName: '', needsDisplayName: true };
+      if (identityState.displayName) saveReviewerState(identityState.displayName);
       profile.hidden = !identityState.needsDisplayName;
-      identity.textContent = identityState.displayName ? '投稿者：' + identityState.displayName : 'Googleアカウントで認証済み';
-      if (state.spreadsheetUrl) { admin.href = state.spreadsheetUrl; admin.hidden = false; }
+      displayNameInput.value = identityState.needsDisplayName ? reviewerState.displayName : '';
+      identity.textContent = identityState.displayName ? '投稿者：' + identityState.displayName : '初回投稿時に表示名を入力します';
       updateCounts();
       if (pendingLocation && pendingLocation.anchor && anchors[pendingLocation.anchor]) { focusAnchor(pendingLocation.anchor); openDrawer(anchors[pendingLocation.anchor], false); }
       else render();
     }).withFailureHandler(function (failure) {
       identity.textContent = 'コメント機能を利用できません'; list.replaceChildren(el('p', 'hsc-empty', failureMessage(failure))); textarea.disabled = true; submit.disabled = true;
-    }).getCommentState();
+    }).getCommentState({ reviewerToken: reviewerState.reviewerToken });
   });
 })();

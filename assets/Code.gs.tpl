@@ -1,6 +1,5 @@
 var HSC_CONFIG = __HSC_CONFIG_JSON__;
 var HSC_PROPERTY_KEY = 'HSC_SPREADSHEET_' + HSC_CONFIG.reportId;
-var HSC_OWNER_PROPERTY_KEY = 'HSC_OWNER_EMAIL_' + HSC_CONFIG.reportId;
 var HSC_COMMENT_SHEET_NAME = 'comments';
 var HSC_REVIEWER_SHEET_NAME = 'reviewers';
 var HSC_COMMENT_HEADERS = [
@@ -8,9 +7,10 @@ var HSC_COMMENT_HEADERS = [
   'anchor_path', 'quote_snapshot', 'location_url', 'author_email',
   'author_key', 'author_display_name', 'body', 'status', 'updated_at'
 ];
-var HSC_REVIEWER_HEADERS = ['author_email', 'display_name', 'created_at', 'updated_at'];
+var HSC_REVIEWER_HEADERS = ['author_email', 'author_key', 'display_name', 'created_at', 'updated_at'];
 var HSC_RATE_LIMIT_MAX = 10;
 var HSC_RATE_LIMIT_SECONDS = 60;
+var HSC_GLOBAL_RATE_LIMIT_MAX = 60;
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
@@ -19,16 +19,7 @@ function doGet() {
 }
 
 function setupComments() {
-  var reviewer = assertReviewer_();
-  var properties = PropertiesService.getScriptProperties();
-  var storedOwnerEmail = String(properties.getProperty(HSC_OWNER_PROPERTY_KEY) || '').trim().toLowerCase();
-  if (!storedOwnerEmail) {
-    var effectiveEmail = String(Session.getEffectiveUser().getEmail() || '').trim().toLowerCase();
-    if (!effectiveEmail || reviewer.email !== effectiveEmail) throw new Error('管理者アカウントでセットアップを実行してください。');
-    properties.setProperty(HSC_OWNER_PROPERTY_KEY, reviewer.email);
-    storedOwnerEmail = reviewer.email;
-  }
-  if (reviewer.email !== storedOwnerEmail) throw new Error('管理者アカウントでセットアップを実行してください。');
+  assertSetupOwner_();
   var spreadsheet = getCommentSpreadsheet_(false);
   ensureCommentSheet_(spreadsheet);
   ensureReviewerSheet_(spreadsheet);
@@ -37,27 +28,27 @@ function setupComments() {
   return url;
 }
 
-function getCommentState() {
-  var reviewer = assertReviewer_();
+function getCommentState(payload) {
+  var input = payload || {};
+  var reviewerToken = normalizeReviewerToken_(input.reviewerToken, false);
+  var reviewerKey = reviewerToken ? hashPrivateValue_(reviewerToken) : '';
   var spreadsheet = getCommentSpreadsheet_(false);
   ensureCommentSheet_(spreadsheet);
   var reviewerSheet = ensureReviewerSheet_(spreadsheet);
-  var reviewerRecord = findReviewerByEmail_(reviewerSheet, reviewer.email);
-  var ownerEmail = String(PropertiesService.getScriptProperties().getProperty(HSC_OWNER_PROPERTY_KEY) || '').trim().toLowerCase();
+  var reviewerRecord = reviewerKey ? findReviewerByKey_(reviewerSheet, reviewerKey) : null;
   return {
     identity: {
-      authenticated: true,
       displayName: reviewerRecord ? publicDisplayName_(reviewerRecord.display_name, 'レビュアー') : '',
       needsDisplayName: !reviewerRecord
     },
-    comments: readComments_(spreadsheet),
-    spreadsheetUrl: reviewer.email === ownerEmail ? spreadsheet.getUrl() : ''
+    comments: readComments_(spreadsheet)
   };
 }
 
 function addComment(payload) {
-  var reviewer = assertReviewer_();
   var input = payload || {};
+  var reviewerToken = normalizeReviewerToken_(input.reviewerToken, true);
+  var reviewerKey = hashPrivateValue_(reviewerToken);
   var anchorId = normalizeField_(input.anchorId, 'コメント位置', 100, true);
   var anchorLabel = normalizeField_(input.anchorLabel, 'コメント位置名', 200, true);
   var anchorPath = normalizeField_(input.anchorPath, 'コメント位置の階層', 500, false) || anchorLabel;
@@ -75,8 +66,8 @@ function addComment(payload) {
     var spreadsheet = getCommentSpreadsheet_(true);
     var commentSheet = ensureCommentSheet_(spreadsheet);
     var reviewerSheet = ensureReviewerSheet_(spreadsheet);
-    var reviewerRecord = getOrCreateReviewer_(reviewerSheet, reviewer.email, input.displayName, createdAt);
-    assertRateLimit_(reviewer.email);
+    var reviewerRecord = getOrCreateReviewer_(reviewerSheet, reviewerKey, input.displayName, createdAt);
+    assertRateLimit_(reviewerKey);
     var record = {
       comment_id: commentId,
       created_at: createdAt,
@@ -86,8 +77,8 @@ function addComment(payload) {
       anchor_path: anchorPath,
       quote_snapshot: quoteSnapshot,
       location_url: locationUrl,
-      author_email: reviewer.email,
-      author_key: reviewer.key,
+      author_email: '',
+      author_key: reviewerKey,
       author_display_name: reviewerRecord.displayName,
       body: body,
       status: '未対応',
@@ -103,24 +94,31 @@ function addComment(payload) {
   return publicComment;
 }
 
-function assertReviewer_() {
-  var email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
-  if (!email) throw new Error('Googleアカウントを確認できないため、コメントを投稿できません。公開範囲と実行ユーザー設定を確認してください。');
-  if (HSC_CONFIG.allowedDomains.length) {
-    var domain = email.split('@').pop();
-    if (HSC_CONFIG.allowedDomains.indexOf(domain) === -1) throw new Error('このGoogle Workspaceアカウントではコメントを投稿できません。');
+function assertSetupOwner_() {
+  var activeEmail = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
+  var effectiveEmail = String(Session.getEffectiveUser().getEmail() || '').trim().toLowerCase();
+  if (!activeEmail || !effectiveEmail || activeEmail !== effectiveEmail) {
+    throw new Error('Apps Scriptエディタから、デプロイ所有者のアカウントで実行してください。');
   }
-  return { email: email, key: Session.getTemporaryActiveUserKey() };
 }
 
-function getOrCreateReviewer_(sheet, email, requestedDisplayName, now) {
-  var existing = findReviewerByEmail_(sheet, email);
+function normalizeReviewerToken_(value, required) {
+  var token = String(value || '').trim();
+  if (!token && !required) return '';
+  if (!/^[A-Za-z0-9_-]{24,128}$/.test(token)) {
+    throw new Error('投稿者情報を保存できませんでした。ページを再読み込みして再度お試しください。');
+  }
+  return token;
+}
+
+function getOrCreateReviewer_(sheet, reviewerKey, requestedDisplayName, now) {
+  var existing = findReviewerByKey_(sheet, reviewerKey);
   if (existing) return { displayName: publicDisplayName_(existing.display_name, 'レビュアー') };
 
   var displayName = normalizeDisplayName_(requestedDisplayName);
-  assertDisplayNameAvailable_(sheet, email, displayName);
   appendRecord_(sheet, {
-    author_email: email,
+    author_email: '',
+    author_key: reviewerKey,
     display_name: displayName,
     created_at: now,
     updated_at: now
@@ -128,24 +126,12 @@ function getOrCreateReviewer_(sheet, email, requestedDisplayName, now) {
   return { displayName: displayName };
 }
 
-function findReviewerByEmail_(sheet, email) {
+function findReviewerByKey_(sheet, reviewerKey) {
   var rows = readRecords_(sheet);
   for (var i = 0; i < rows.length; i += 1) {
-    if (String(rows[i].author_email || '').trim().toLowerCase() === email) return rows[i];
+    if (String(rows[i].author_key || '').trim() === reviewerKey) return rows[i];
   }
   return null;
-}
-
-function assertDisplayNameAvailable_(sheet, email, displayName) {
-  var requestedKey = normalizeDisplayNameKey_(displayName);
-  var rows = readRecords_(sheet);
-  for (var i = 0; i < rows.length; i += 1) {
-    var rowEmail = String(rows[i].author_email || '').trim().toLowerCase();
-    var rowDisplayName = String(rows[i].display_name || '');
-    if (rowEmail !== email && safeDisplayNameKey_(rowDisplayName) === requestedKey) {
-      throw new Error('この表示名は利用できません。別の表示名を入力してください。');
-    }
-  }
 }
 
 function normalizeDisplayName_(value) {
@@ -161,27 +147,22 @@ function normalizeDisplayName_(value) {
   return text;
 }
 
-function normalizeDisplayNameKey_(value) {
-  return normalizeDisplayName_(value).toLowerCase();
-}
-
-function safeDisplayNameKey_(value) {
-  try { return normalizeDisplayNameKey_(value); }
-  catch (error) { return ''; }
-}
-
 function publicDisplayName_(value, fallback) {
   try { return normalizeDisplayName_(value); }
   catch (error) { return fallback || 'レビュアー'; }
 }
 
-function assertRateLimit_(email) {
+function assertRateLimit_(reviewerKey) {
   var bucket = Math.floor(new Date().getTime() / (HSC_RATE_LIMIT_SECONDS * 1000));
   var cache = CacheService.getScriptCache();
-  var key = 'HSC_RATE_' + hashPrivateValue_(email) + '_' + bucket;
+  var key = 'HSC_RATE_' + reviewerKey + '_' + bucket;
   var count = Number(cache.get(key) || 0);
   if (count >= HSC_RATE_LIMIT_MAX) throw new Error('投稿が続いています。少し待ってから再度お試しください。');
   cache.put(key, String(count + 1), HSC_RATE_LIMIT_SECONDS + 10);
+  var globalKey = 'HSC_RATE_GLOBAL_' + HSC_CONFIG.reportId + '_' + bucket;
+  var globalCount = Number(cache.get(globalKey) || 0);
+  if (globalCount >= HSC_GLOBAL_RATE_LIMIT_MAX) throw new Error('投稿が集中しています。少し待ってから再度お試しください。');
+  cache.put(globalKey, String(globalCount + 1), HSC_RATE_LIMIT_SECONDS + 10);
 }
 
 function hashPrivateValue_(value) {

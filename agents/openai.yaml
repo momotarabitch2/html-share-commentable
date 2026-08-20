@@ -1,0 +1,6 @@
+interface:
+  display_name: "HTML Share Commentable"
+  short_description: "HTMLをGASコメント共有ページへ変換"
+  default_prompt: "Use $html-share-commentable to turn this completed HTML file into a copy-ready Apps Script comment-sharing bundle."
+policy:
+  allow_implicit_invocation: true
